@@ -60,3 +60,7 @@ wrangler deploy
 ## 注意
 - Bot ロールが付与対象ロールより上位にあることを確認してください
 - `VERIFIED_ROLE_ID` は付与したいロール ID を指定します
+
+## License / ライセンス
+MIT License. See `LICENSE`.
+MIT License（詳細は `LICENSE`）
