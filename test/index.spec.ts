@@ -60,12 +60,13 @@ async function makeToken(
   secret: string,
   guildId: string,
   userId: string,
-  ts: number,
+  roleId: string,
+  exp: number,
   diff: number
 ): Promise<string> {
   const tokenNonce = crypto.getRandomValues(new Uint8Array(16));
   const nonceB64u = u8ToBase64Url(tokenNonce);
-  const payload = `pow.v1.${nonceB64u}.${guildId}.${userId}.${ts}.${diff}`;
+  const payload = `pow.v1.${nonceB64u}.${guildId}.${userId}.${roleId}.${exp}.${diff}`;
   const sig = await hmacSha256Base64Url(secret, payload);
   return `${payload}.${sig}`;
 }
@@ -87,13 +88,22 @@ describe("nonce replay protection", () => {
 
     try {
       const diff = 1;
-      const token = await makeToken(testEnv.POW_SECRET, "guild", "user", Math.floor(Date.now() / 1000), diff);
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + 600;
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        testEnv.VERIFIED_ROLE_ID,
+        exp,
+        diff
+      );
       const powNonce = await findPowNonce(token, diff);
 
       const request = new IncomingRequest("http://example.com/api/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token, nonce: powNonce }),
+        body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
       });
 
       const ctx1 = createExecutionContext();
@@ -106,6 +116,135 @@ describe("nonce replay protection", () => {
       const res2 = await worker.fetch(request, testEnv, ctx2);
       await waitOnExecutionContext(ctx2);
       expect(res2.status).toBe(409);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects when submit user_id mismatches token", async () => {
+    const testEnv = env as any;
+    testEnv.POW_SECRET = "test-secret";
+    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
+    testEnv.VERIFIED_ROLE_ID = "role-id";
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("https://discord.com/api/v10/")) {
+        return new Response("", { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const diff = 1;
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + 600;
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        testEnv.VERIFIED_ROLE_ID,
+        exp,
+        diff
+      );
+      const powNonce = await findPowNonce(token, diff);
+
+      const request = new IncomingRequest("http://example.com/api/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, nonce: powNonce, user_id: "other", guild_id: "guild" }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(request, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(400);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects when submit guild_id mismatches token", async () => {
+    const testEnv = env as any;
+    testEnv.POW_SECRET = "test-secret";
+    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
+    testEnv.VERIFIED_ROLE_ID = "role-id";
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("https://discord.com/api/v10/")) {
+        return new Response("", { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const diff = 1;
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + 600;
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        testEnv.VERIFIED_ROLE_ID,
+        exp,
+        diff
+      );
+      const powNonce = await findPowNonce(token, diff);
+
+      const request = new IncomingRequest("http://example.com/api/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "other" }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(request, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(400);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects when token role_id mismatches env", async () => {
+    const testEnv = env as any;
+    testEnv.POW_SECRET = "test-secret";
+    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
+    testEnv.VERIFIED_ROLE_ID = "role-id";
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("https://discord.com/api/v10/")) {
+        return new Response("", { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const diff = 1;
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + 600;
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        "other-role",
+        exp,
+        diff
+      );
+      const powNonce = await findPowNonce(token, diff);
+
+      const request = new IncomingRequest("http://example.com/api/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
+      });
+
+      const ctx = createExecutionContext();
+      const res = await worker.fetch(request, testEnv, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(res.status).toBe(400);
     } finally {
       vi.unstubAllGlobals();
     }

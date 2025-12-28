@@ -166,48 +166,68 @@ async function verifyDiscordSig(req: Request, env: Env, bodyText: string): Promi
 // -------------------- token / pow --------------------
 async function makeToken(env: Env, guildId: string, userId: string): Promise<string> {
   const ts = Math.floor(Date.now() / 1000);
+  const exp = ts + POW_TTL_SEC;
   const tokenNonce = crypto.getRandomValues(new Uint8Array(16));
   const nonceB64u = u8ToBase64Url(tokenNonce);
 
-  // pow.v1.nonce.guildId.userId.ts.diff.sig
-  const payload = `pow.v1.${nonceB64u}.${guildId}.${userId}.${ts}.${DIFFICULTY}`;
+  // pow.v1.nonce.guildId.userId.roleId.exp.diff.sig
+  const payload = `pow.v1.${nonceB64u}.${guildId}.${userId}.${env.VERIFIED_ROLE_ID}.${exp}.${DIFFICULTY}`;
   const sig = await hmacSha256Base64Url(env.POW_SECRET, payload);
   return `${payload}.${sig}`;
 }
 
 function parseToken(token: string) {
   const parts = token.split(".");
-  if (parts.length !== 8 || parts[0] !== "pow" || parts[1] !== "v1") return null;
-  const payload = parts.slice(0, 7).join(".");
+  if (parts.length !== 9 || parts[0] !== "pow" || parts[1] !== "v1") return null;
+  const payload = parts.slice(0, 8).join(".");
   return {
     nonce: parts[2],
     guildId: parts[3],
     userId: parts[4],
-    ts: Number(parts[5]),
-    diff: Number(parts[6]),
-    sig: parts[7],
+    roleId: parts[5],
+    exp: Number(parts[6]),
+    diff: Number(parts[7]),
+    sig: parts[8],
     payload,
   };
 }
 
-async function verifyTokenAndPow(env: Env, tokenRaw: string, nonceRaw: string) {
+async function verifyTokenAndPow(
+  env: Env,
+  tokenRaw: string,
+  nonceRaw: string,
+  expected?: { userId?: string; guildId?: string }
+) {
   const token = tokenRaw.trim();
   const nonce = nonceRaw.trim();
 
   const parsed = parseToken(token);
   if (!parsed) return { ok: false, msg: "token形式が不正です。" as const };
+  if (!parsed.nonce) return { ok: false, msg: "invalid token nonce" as const };
 
-  if (!Number.isFinite(parsed.ts) || !Number.isFinite(parsed.diff)) {
+  if (!Number.isFinite(parsed.exp) || !Number.isFinite(parsed.diff)) {
     return { ok: false, msg: "tokenが壊れています。" as const };
   }
 
   const now = Math.floor(Date.now() / 1000);
-  if (now - parsed.ts > POW_TTL_SEC) {
+  if (now > parsed.exp) {
     return { ok: false, msg: "期限切れです。Discordで /pow からやり直してください。" as const };
   }
 
-  const expected = await hmacSha256Base64Url(env.POW_SECRET, parsed.payload);
-  if (!constantTimeEq(expected, parsed.sig)) {
+  if (parsed.roleId !== env.VERIFIED_ROLE_ID) {
+    return { ok: false, msg: "role mismatch" as const };
+  }
+
+  if (expected?.userId && expected.userId !== parsed.userId) {
+    return { ok: false, msg: "user mismatch" as const };
+  }
+
+  if (expected?.guildId && expected.guildId !== parsed.guildId) {
+    return { ok: false, msg: "guild mismatch" as const };
+  }
+
+  const expectedSig = await hmacSha256Base64Url(env.POW_SECRET, parsed.payload);
+  if (!constantTimeEq(expectedSig, parsed.sig)) {
     return { ok: false, msg: "署名が不正です。" as const };
   }
 
@@ -228,7 +248,7 @@ async function verifyTokenAndPow(env: Env, tokenRaw: string, nonceRaw: string) {
     guildId: parsed.guildId,
     userId: parsed.userId,
     tokenNonce: parsed.nonce,
-    expiresAt: parsed.ts + POW_TTL_SEC,
+    expiresAt: parsed.exp,
   };
 }
 
@@ -322,13 +342,23 @@ if (!token) {
   detailEl.textContent = "Discordで /pow を実行してURLを開き直してください。";
 }
 
-function parseDiff(tok) {
+function parseTokenParts(tok) {
   const parts = tok.split(".");
-  return Number(parts[6]); // pow.v1.nonce.guildId.userId.ts.diff.sig
+  if (parts.length !== 9) return null;
+  return {
+    guildId: parts[3],
+    userId: parts[4],
+    roleId: parts[5],
+    exp: Number(parts[6]),
+    diff: Number(parts[7]),
+  };
 }
 
-const diff = token ? parseDiff(token) : NaN;
-if (token && !Number.isFinite(diff)) {
+const parsed = token ? parseTokenParts(token) : null;
+const diff = parsed ? parsed.diff : NaN;
+const submitUserId = parsed ? String(parsed.userId ?? "").trim() : "";
+const submitGuildId = parsed ? String(parsed.guildId ?? "").trim() : "";
+if (token && (!parsed || !submitUserId || !submitGuildId || !Number.isFinite(diff))) {
   setStatus("token形式が不正です", "ng");
   startBtn.disabled = true;
   detailEl.textContent = "tokenが壊れている可能性があります。Discordで /pow をやり直してください。";
@@ -423,7 +453,12 @@ startBtn.onclick = async () => {
         const r = await fetch("/api/submit", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ token: token.trim(), nonce: String(msg.nonce).trim() })
+          body: JSON.stringify({
+            token: token.trim(),
+            nonce: String(msg.nonce).trim(),
+            user_id: submitUserId,
+            guild_id: submitGuildId,
+          })
         });
 
         const j = await r.json().catch(() => null);
@@ -514,7 +549,7 @@ export default {
           const nonce = String((opts.nonce ?? "")).trim();
           if (!token || !nonce) return json(ephemeral("token(challenge) と nonce を指定してください。"));
 
-          const v = await verifyTokenAndPow(env, token, nonce);
+          const v = await verifyTokenAndPow(env, token, nonce, { userId, guildId });
           if (!v.ok) return json(ephemeral(v.msg));
 
           const nonceCheck = await checkAndMarkNonce(env, v.tokenNonce, v.expiresAt);
@@ -551,9 +586,16 @@ export default {
 
       const token = String(body?.token ?? "").trim();
       const nonce = String(body?.nonce ?? "").trim();
-      if (!token || !nonce) return json({ ok: false, error: "missing token/nonce" }, 400);
+      const submitUserId = String(body?.user_id ?? "").trim();
+      const submitGuildId = String(body?.guild_id ?? "").trim();
+      if (!token || !nonce || !submitUserId || !submitGuildId) {
+        return json({ ok: false, error: "missing token/nonce/user_id/guild_id" }, 400);
+      }
 
-      const v = await verifyTokenAndPow(env, token, nonce);
+      const v = await verifyTokenAndPow(env, token, nonce, {
+        userId: submitUserId,
+        guildId: submitGuildId,
+      });
       if (!v.ok) return json({ ok: false, error: v.msg, debug: (v as any).debug }, 400);
 
       const nonceCheck = await checkAndMarkNonce(env, v.tokenNonce, v.expiresAt);
