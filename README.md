@@ -18,7 +18,7 @@ Cloudflare Workers 上で動く、PoW 形式の Discord ロール認証。`/pow`
 npm install
 ```
 
-2) Guild コマンドを登録（テストに最速）
+2) Guild コマンドを登録
 ```bash
 # PowerShell 例
 $env:DISCORD_APP_ID="<app_id>"
