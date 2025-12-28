@@ -9,7 +9,7 @@ interface Env {
 
 // まずはUX優先で軽め推奨（重ければ下げ、軽すぎれば上げる）
 const POW_TTL_SEC = 600; // 10分
-const DIFFICULTY = 18;   // 16〜20あたりで調整
+const DIFFICULTY = 20;   // 16〜20あたりで調整
 
 // -------------------- util --------------------
 function hexToU8(hex: string): Uint8Array {
