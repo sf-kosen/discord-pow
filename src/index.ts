@@ -95,8 +95,33 @@ function html(body: string, status = 200): Response {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
       // 最低限のCSP（必要なら後で調整）
-      "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; worker-src 'self' blob:; connect-src 'self'; style-src 'self' 'unsafe-inline';",
+      "content-security-policy": "default-src 'self'; connect-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    },
+  });
+}
+
+function js(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+function css(body: string, status = 200): Response {
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/css; charset=utf-8",
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
     },
   });
 }
@@ -284,7 +309,7 @@ async function addRoleDetailed(env: Env, guildId: string, userId: string) {
 
 // -------------------- verify page --------------------
 function verifyPageHtml(): string {
-  // tokenはURLフラグメント(#t=)から読む（サーバーに送られない）
+  // tokenはURLフラグメント(#token=)から読む（サーバーに送られない）
   return `<!doctype html>
 <html lang="ja">
 <head>
@@ -292,18 +317,7 @@ function verifyPageHtml(): string {
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PoW認証</title>
   <meta http-equiv="Cache-Control" content="no-store" />
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:820px;margin:40px auto;padding:0 16px;line-height:1.6}
-    .card{border:1px solid #ddd;border-radius:12px;padding:16px}
-    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-    button{padding:10px 14px;border-radius:10px;border:1px solid #333;background:#111;color:#fff;cursor:pointer}
-    button:disabled{opacity:.5;cursor:not-allowed}
-    .muted{color:#666}
-    .ok{color:#0a7}
-    .ng{color:#c33}
-    pre{white-space:pre-wrap;word-break:break-all;background:#f7f7f7;padding:10px;border-radius:10px}
-    .small{font-size:13px}
-  </style>
+  <link rel="stylesheet" href="/verify.css" />
 </head>
 <body>
   <h1>PoW認証</h1>
@@ -317,9 +331,27 @@ function verifyPageHtml(): string {
     <pre id="detail">-</pre>
     <p class="small muted">注意: 失敗する場合はBotの権限（Manage Roles）とロール階層（Botロールが対象ロールより上）を確認してください。</p>
   </div>
+  <script src="/verify.js" defer></script>
+</body>
+</html>`;
+}
 
-<script>
-const startBtn = document.getElementById("start");
+
+function verifyPageCss(): string {
+  return `    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:820px;margin:40px auto;padding:0 16px;line-height:1.6}
+    .card{border:1px solid #ddd;border-radius:12px;padding:16px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    button{padding:10px 14px;border-radius:10px;border:1px solid #333;background:#111;color:#fff;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .muted{color:#666}
+    .ok{color:#0a7}
+    .ng{color:#c33}
+    pre{white-space:pre-wrap;word-break:break-all;background:#f7f7f7;padding:10px;border-radius:10px}
+    .small{font-size:13px}`;
+}
+
+function verifyPageJs(): string {
+  return `const startBtn = document.getElementById("start");
 const statusEl = document.getElementById("status");
 const progressEl = document.getElementById("progress");
 const detailEl = document.getElementById("detail");
@@ -331,7 +363,7 @@ function setStatus(text, cls) {
 
 function getTokenFromHash() {
   const h = location.hash || "";
-  const m = h.match(/[#&]t=([^&]+)/);
+  const m = h.match(/[#&]token=([^&]+)/);
   return m ? decodeURIComponent(m[1]) : null;
 }
 
@@ -365,49 +397,7 @@ if (token && (!parsed || !submitUserId || !submitGuildId || !Number.isFinite(dif
 }
 
 function makeWorker() {
-  const code = \`
-    function hasLeadingZeroBits(bytes, zeroBits) {
-      let bits = zeroBits;
-      for (let i = 0; i < bytes.length; i++) {
-        if (bits <= 0) return true;
-        const b = bytes[i];
-        if (bits >= 8) { if (b !== 0) return false; bits -= 8; }
-        else { const mask = 0xff << (8 - bits); return (b & mask) === 0; }
-      }
-      return bits <= 0;
-    }
-
-    async function sha256Utf8(str) {
-      const enc = new TextEncoder();
-      const buf = enc.encode(str);
-      const digest = await crypto.subtle.digest("SHA-256", buf);
-      return new Uint8Array(digest);
-    }
-
-    let stop = false;
-    self.onmessage = async (e) => {
-      const { token, diff, start, step } = e.data;
-      let nonce = start;
-      const started = Date.now();
-      while (!stop) {
-        const h = await sha256Utf8(token + "." + nonce);
-        if (hasLeadingZeroBits(h, diff)) {
-          self.postMessage({ type: "found", nonce, ms: Date.now() - started });
-          return;
-        }
-        nonce += step;
-        if (nonce % (step * 5000) === 0) {
-          self.postMessage({ type: "progress", nonce, ms: Date.now() - started });
-        }
-      }
-    };
-
-    self.addEventListener("message", (e) => {
-      if (e.data && e.data.type === "stop") stop = true;
-    });
-  \`;
-  const blob = new Blob([code], { type: "text/javascript" });
-  return new Worker(URL.createObjectURL(blob));
+  return new Worker("/verify-worker.js");
 }
 
 startBtn.onclick = async () => {
@@ -476,10 +466,51 @@ startBtn.onclick = async () => {
 
     w.postMessage({ token, diff, start: i, step: n });
   }
-};
-</script>
-</body>
-</html>`;
+};`;
+}
+
+function verifyWorkerJs(): string {
+  return `
+    function hasLeadingZeroBits(bytes, zeroBits) {
+      let bits = zeroBits;
+      for (let i = 0; i < bytes.length; i++) {
+        if (bits <= 0) return true;
+        const b = bytes[i];
+        if (bits >= 8) { if (b !== 0) return false; bits -= 8; }
+        else { const mask = 0xff << (8 - bits); return (b & mask) === 0; }
+      }
+      return bits <= 0;
+    }
+
+    async function sha256Utf8(str) {
+      const enc = new TextEncoder();
+      const buf = enc.encode(str);
+      const digest = await crypto.subtle.digest("SHA-256", buf);
+      return new Uint8Array(digest);
+    }
+
+    let stop = false;
+    self.onmessage = async (e) => {
+      const { token, diff, start, step } = e.data;
+      let nonce = start;
+      const started = Date.now();
+      while (!stop) {
+        const h = await sha256Utf8(token + "." + nonce);
+        if (hasLeadingZeroBits(h, diff)) {
+          self.postMessage({ type: "found", nonce, ms: Date.now() - started });
+          return;
+        }
+        nonce += step;
+        if (nonce % (step * 5000) === 0) {
+          self.postMessage({ type: "progress", nonce, ms: Date.now() - started });
+        }
+      }
+    };
+
+    self.addEventListener("message", (e) => {
+      if (e.data && e.data.type === "stop") stop = true;
+    });
+  `;
 }
 
 // -------------------- worker --------------------
@@ -514,7 +545,7 @@ export default {
         if (!guildId || !userId) return json(ephemeral("サーバー内で実行してください。"));
 
         const token = await makeToken(env, guildId, userId);
-        const verifyUrl = `${url.origin}/verify?v=${Date.now()}#t=${encodeURIComponent(token)}`;
+        const verifyUrl = `${url.origin}/verify#token=${encodeURIComponent(token)}`;
         const content =
           "リンクを開いてPoWを完了してください（完了後に自動でロールが付きます）。";
 
@@ -532,8 +563,8 @@ export default {
 
         if (name === cmd) {
           const token = await makeToken(env, guildId, userId);
-          // キャッシュ回避のため v= を付ける。tokenは#（フラグメント）へ。
-          const verifyUrl = `${url.origin}/verify?v=${Date.now()}#t=${encodeURIComponent(token)}`;
+          // tokenは#（フラグメント）へ。
+          const verifyUrl = `${url.origin}/verify#token=${encodeURIComponent(token)}`;
 
           const content =
             `PoW認証URLを発行しました（有効 ${POW_TTL_SEC}s / difficulty=${DIFFICULTY}）。\n` +
@@ -571,6 +602,15 @@ export default {
     // ---- Verify page ----
     if (url.pathname === "/verify") {
       return html(verifyPageHtml());
+    }
+    if (url.pathname === "/verify.js") {
+      return js(verifyPageJs());
+    }
+    if (url.pathname === "/verify-worker.js") {
+      return js(verifyWorkerJs());
+    }
+    if (url.pathname === "/verify.css") {
+      return css(verifyPageCss());
     }
 
     // ---- Submit ----

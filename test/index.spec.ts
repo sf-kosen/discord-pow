@@ -72,6 +72,15 @@ async function makeToken(
 }
 
 describe("nonce replay protection", () => {
+  it("serves /verify with no-store and no-referrer headers", async () => {
+    const request = new IncomingRequest("http://example.com/verify");
+    const ctx = createExecutionContext();
+    const res = await worker.fetch(request, env, ctx);
+    await waitOnExecutionContext(ctx);
+    expect(res.headers.get("cache-control")).toContain("no-store");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
   it("rejects the second submit with the same token nonce", async () => {
     const testEnv = env as any;
     testEnv.POW_SECRET = "test-secret";
