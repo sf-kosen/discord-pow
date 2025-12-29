@@ -14,6 +14,8 @@ interface Env {
 const POW_TTL_SEC = 600; // 10 min
 const DIFFICULTY_DEFAULT = 20; // 16-20 range
 const DIFFICULTY_MOBILE = 16;
+const ROLE_GRANT_MAX_ATTEMPTS = 3;
+const ROLE_GRANT_BASE_DELAY_MS = 200;
 
 // -------------------- util --------------------
 function hexToU8(hex: string): Uint8Array {
@@ -312,14 +314,101 @@ async function checkAndMarkNonce(
 }
 
 // -------------------- role grant --------------------
+function isRetryableRoleGrantStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function logRoleGrantResult(input: {
+  guildId: string;
+  userId: string;
+  nonceHash: string;
+  result: "success" | "failure";
+  status: number;
+  attempts: number;
+  retryable: boolean;
+}) {
+  console.log(
+    JSON.stringify({
+      event: "role_grant",
+      guild_id: input.guildId,
+      user_id: input.userId,
+      nonce_hash: input.nonceHash,
+      result: input.result,
+      status: input.status,
+      attempts: input.attempts,
+      retryable: input.retryable,
+    })
+  );
+}
+
 async function addRoleDetailed(env: Env, guildId: string, userId: string) {
   const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${env.VERIFIED_ROLE_ID}`;
   const r = await fetch(url, {
     method: "PUT",
     headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` },
   });
-  const body = await r.text().catch(() => "");
-  return { ok: r.status === 204 || r.ok, status: r.status, body };
+  const retryAfterRaw = r.headers.get("retry-after");
+  const retryAfter = retryAfterRaw ? Number(retryAfterRaw) : NaN;
+  const retryAfterSec = Number.isFinite(retryAfter) ? retryAfter : undefined;
+  return { ok: r.status === 204 || r.ok, status: r.status, retryAfterSec };
+}
+
+async function addRoleWithRetry(
+  env: Env,
+  guildId: string,
+  userId: string,
+  nonceHash: string
+): Promise<{ ok: boolean; status: number; attempts: number; retryable: boolean }> {
+  let lastStatus = 500;
+  let lastRetryable = false;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= ROLE_GRANT_MAX_ATTEMPTS; attempt++) {
+    attempts = attempt;
+    const res = await addRoleDetailed(env, guildId, userId);
+    lastStatus = res.status;
+    lastRetryable = isRetryableRoleGrantStatus(res.status);
+    if (res.ok) {
+      logRoleGrantResult({
+        guildId,
+        userId,
+        nonceHash,
+        result: "success",
+        status: res.status,
+        attempts: attempt,
+        retryable: false,
+      });
+      return { ok: true, status: res.status, attempts: attempt, retryable: false };
+    }
+
+    if (!lastRetryable || attempt == ROLE_GRANT_MAX_ATTEMPTS) break;
+
+    let delayMs = ROLE_GRANT_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+    if (res.retryAfterSec && Number.isFinite(res.retryAfterSec)) {
+      delayMs = Math.max(delayMs, Math.ceil(res.retryAfterSec * 1000));
+    }
+    const jitterMs = Math.floor(Math.random() * 100);
+    await sleep(delayMs + jitterMs);
+  }
+
+  logRoleGrantResult({
+    guildId,
+    userId,
+    nonceHash,
+    result: "failure",
+    status: lastStatus,
+    attempts,
+    retryable: lastRetryable,
+  });
+  return {
+    ok: false,
+    status: lastStatus,
+    attempts,
+    retryable: lastRetryable,
+  };
 }
 
 // -------------------- verify page --------------------
@@ -601,12 +690,12 @@ export default {
 
           const nonceCheck = await checkAndMarkNonce(env, v.tokenNonce, v.expiresAt);
           if (!nonceCheck.ok) return json(ephemeral(nonceCheck.msg));
-
-          const res = await addRoleDetailed(env, v.guildId, v.userId);
+          const nonceHash = await sha256Base64Url(v.tokenNonce);
+          const res = await addRoleWithRetry(env, v.guildId, v.userId, nonceHash);
           if (!res.ok) {
-            return json(ephemeral(`ロール付与に失敗: status=${res.status} body=${res.body || "(empty)"}`));
+            return json(ephemeral("Failed to add role. status=" + res.status));
           }
-          return json(ephemeral("認証完了。ロールを付与しました。"));
+          return json(ephemeral("Role granted."));
         }
 
         return json(ephemeral("未対応のコマンドです。"));
@@ -656,11 +745,10 @@ export default {
 
       const nonceCheck = await checkAndMarkNonce(env, v.tokenNonce, v.expiresAt);
       if (!nonceCheck.ok) return json({ ok: false, error: nonceCheck.msg }, nonceCheck.status);
-
-      const res = await addRoleDetailed(env, v.guildId, v.userId);
+      const nonceHash = await sha256Base64Url(v.tokenNonce);
+      const res = await addRoleWithRetry(env, v.guildId, v.userId, nonceHash);
       if (!res.ok) {
-        // ここがあなたのログで失敗している箇所。status/bodyを返して原因を見える化する。
-        return json({ ok: false, error: "failed to add role (check permissions/role hierarchy)", discord: res }, 500);
+        return json({ ok: false, error: "failed to add role", status: res.status }, 500);
       }
 
       return json({ ok: true });
