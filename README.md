@@ -100,10 +100,23 @@ npm run deploy:v2
 - サーバー内で `/pow` を実行
 - 表示された URL を開き、PoW が完了すると自動でロールが付与されます
 
+## 脅威モデル / 運用メモ
+- リプレイ対策: token内のnonceはワンタイム（TTL内でも再利用不可）
+- 防げること: token改ざん、別ユーザー/ギルド/ロールへの転用、単純な連打の抑止
+- 防げないこと: GPU/分散での高速解、アカウント共有・代理解、PoWの完全迂回
+- difficulty目安: まずはPC=20、スマホ=16あたりから開始し、体感時間に合わせて調整
+- レート制限推奨: `/interactions` と `/api/submit` にWAF/Rate Limitを適用
+
 ## 設定
 - `src/index.ts`:
   - `POW_TTL_SEC` トークンの有効期限（秒）
-  - `DIFFICULTY` PoW 難易度（先頭 0 ビット数）
+  - `DIFFICULTY_DEFAULT` / `DIFFICULTY_MOBILE` PoW 難易度（先頭 0 ビット数、実質のDIFFICULTY）
+
+## Secrets
+- `DISCORD_PUBLIC_KEY`
+- `DISCORD_BOT_TOKEN`
+- `VERIFIED_ROLE_ID`
+- `POW_SECRET`
 
 ## エンドポイント
 - `POST /interactions`: Discord interaction handler
