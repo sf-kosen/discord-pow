@@ -29,7 +29,7 @@
 	"migrations": [
 		{
 			"tag": "v1",
-			"new_classes": ["NonceStore"]
+			"new_sqlite_classes": ["NonceStore"]
 		}
 	]
 	/**
