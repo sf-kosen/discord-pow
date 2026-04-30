@@ -1,8 +1,54 @@
-import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import { describe, it, expect, vi } from "vitest";
-import worker from "../src/index";
+import worker, { NonceStore } from "../src/index";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+
+class MemoryStorage {
+  private values = new Map<string, unknown>();
+
+  async get<T>(key: string): Promise<T | undefined> {
+    return this.values.get(key) as T | undefined;
+  }
+
+  async put<T>(key: string, value: T): Promise<void> {
+    this.values.set(key, value);
+  }
+}
+
+class MemoryDurableObjectNamespace {
+  private objects = new Map<
+    string,
+    { fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> }
+  >();
+
+  idFromName(name: string): string {
+    return name;
+  }
+
+  get(id: string) {
+    let object = this.objects.get(id);
+    if (!object) {
+      const durableObject = new NonceStore({ storage: new MemoryStorage() } as any);
+      object = {
+        fetch: (input: RequestInfo | URL, init?: RequestInit) =>
+          durableObject.fetch(input instanceof Request ? input : new Request(input, init)),
+      };
+      this.objects.set(id, object);
+    }
+    return object;
+  }
+}
+
+function createTestEnv(overrides: Record<string, unknown> = {}) {
+  return {
+    POW_SECRET: "test-secret",
+    DISCORD_BOT_TOKEN: "test-bot-token",
+    DISCORD_PUBLIC_KEY: "00",
+    VERIFIED_ROLE_ID: "role-id",
+    NONCE_STORE: new MemoryDurableObjectNamespace(),
+    ...overrides,
+  } as any;
+}
 
 function u8ToBase64Url(u8: Uint8Array): string {
   let s = "";
@@ -73,24 +119,22 @@ async function makeToken(
 
 describe("nonce replay protection", () => {
   it("serves /verify with no-store and no-referrer headers", async () => {
+    const env = createTestEnv();
     const request = new IncomingRequest("http://example.com/verify");
-    const ctx = createExecutionContext();
-    const res = await worker.fetch(request, env, ctx);
-    await waitOnExecutionContext(ctx);
+    const res = await worker.fetch(request, env);
     expect(res.headers.get("cache-control")).toContain("no-store");
     expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("permissions-policy")).toContain("camera=()");
   });
 
   it("rejects the second submit with the same token nonce", async () => {
-    const testEnv = env as any;
-    testEnv.POW_SECRET = "test-secret";
-    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
-    testEnv.VERIFIED_ROLE_ID = "role-id";
+    const testEnv = createTestEnv();
 
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("https://discord.com/api/v10/")) {
-        return new Response("", { status: 204 });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -109,37 +153,62 @@ describe("nonce replay protection", () => {
       );
       const powNonce = await findPowNonce(token, diff);
 
+      const body = JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" });
       const request = new IncomingRequest("http://example.com/api/submit", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
+        body,
       });
 
-      const ctx1 = createExecutionContext();
-      const res1 = await worker.fetch(request, testEnv, ctx1);
-      await waitOnExecutionContext(ctx1);
+      const res1 = await worker.fetch(request, testEnv);
       expect(res1.status).toBe(200);
       expect(await res1.json()).toEqual({ ok: true });
 
-      const ctx2 = createExecutionContext();
-      const res2 = await worker.fetch(request, testEnv, ctx2);
-      await waitOnExecutionContext(ctx2);
+      const replayRequest = new IncomingRequest("http://example.com/api/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      const res2 = await worker.fetch(replayRequest, testEnv);
       expect(res2.status).toBe(409);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
+  it("rejects submit for a guild outside the allowlist", async () => {
+    const testEnv = createTestEnv({ ALLOWED_GUILD_IDS: "other-guild" });
+
+    const diff = 1;
+    const now = Math.floor(Date.now() / 1000);
+    const exp = now + 600;
+    const token = await makeToken(
+      testEnv.POW_SECRET,
+      "guild",
+      "user",
+      testEnv.VERIFIED_ROLE_ID,
+      exp,
+      diff
+    );
+    const powNonce = await findPowNonce(token, diff);
+
+    const request = new IncomingRequest("http://example.com/api/submit", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
+    });
+
+    const res = await worker.fetch(request, testEnv);
+    expect(res.status).toBe(403);
+  });
+
   it("rejects when submit user_id mismatches token", async () => {
-    const testEnv = env as any;
-    testEnv.POW_SECRET = "test-secret";
-    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
-    testEnv.VERIFIED_ROLE_ID = "role-id";
+    const testEnv = createTestEnv();
 
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("https://discord.com/api/v10/")) {
-        return new Response("", { status: 204 });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -164,9 +233,7 @@ describe("nonce replay protection", () => {
         body: JSON.stringify({ token, nonce: powNonce, user_id: "other", guild_id: "guild" }),
       });
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(request, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      const res = await worker.fetch(request, testEnv);
       expect(res.status).toBe(400);
     } finally {
       vi.unstubAllGlobals();
@@ -174,15 +241,12 @@ describe("nonce replay protection", () => {
   });
 
   it("rejects when submit guild_id mismatches token", async () => {
-    const testEnv = env as any;
-    testEnv.POW_SECRET = "test-secret";
-    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
-    testEnv.VERIFIED_ROLE_ID = "role-id";
+    const testEnv = createTestEnv();
 
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("https://discord.com/api/v10/")) {
-        return new Response("", { status: 204 });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -207,9 +271,7 @@ describe("nonce replay protection", () => {
         body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "other" }),
       });
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(request, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      const res = await worker.fetch(request, testEnv);
       expect(res.status).toBe(400);
     } finally {
       vi.unstubAllGlobals();
@@ -217,15 +279,12 @@ describe("nonce replay protection", () => {
   });
 
   it("rejects when token role_id mismatches env", async () => {
-    const testEnv = env as any;
-    testEnv.POW_SECRET = "test-secret";
-    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
-    testEnv.VERIFIED_ROLE_ID = "role-id";
+    const testEnv = createTestEnv();
 
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("https://discord.com/api/v10/")) {
-        return new Response("", { status: 204 });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -250,9 +309,7 @@ describe("nonce replay protection", () => {
         body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
       });
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(request, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      const res = await worker.fetch(request, testEnv);
       expect(res.status).toBe(400);
     } finally {
       vi.unstubAllGlobals();
@@ -260,15 +317,12 @@ describe("nonce replay protection", () => {
   });
 
   it("rejects when token difficulty is tampered", async () => {
-    const testEnv = env as any;
-    testEnv.POW_SECRET = "test-secret";
-    testEnv.DISCORD_BOT_TOKEN = "test-bot-token";
-    testEnv.VERIFIED_ROLE_ID = "role-id";
+    const testEnv = createTestEnv();
 
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("https://discord.com/api/v10/")) {
-        return new Response("", { status: 204 });
+        return new Response(null, { status: 204 });
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -295,9 +349,7 @@ describe("nonce replay protection", () => {
         body: JSON.stringify({ token: tampered, nonce: "0", user_id: "user", guild_id: "guild" }),
       });
 
-      const ctx = createExecutionContext();
-      const res = await worker.fetch(request, testEnv, ctx);
-      await waitOnExecutionContext(ctx);
+      const res = await worker.fetch(request, testEnv);
       expect(res.status).toBe(400);
     } finally {
       vi.unstubAllGlobals();

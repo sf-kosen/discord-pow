@@ -7,15 +7,25 @@ interface Env {
   POW_SECRET: string;
   POW_COMMAND_NAME?: string;
   ENABLE_VERIFY_BUTTON?: string;
+  ENABLE_POW_SUBMIT?: string;
+  ALLOWED_GUILD_IDS?: string;
+  POW_TTL_SEC?: string;
+  POW_DIFFICULTY_DEFAULT?: string;
+  POW_DIFFICULTY_MOBILE?: string;
+  INTERACTIONS_RATE_LIMIT_PER_MIN?: string;
+  SUBMIT_RATE_LIMIT_PER_MIN?: string;
   NONCE_STORE: DurableObjectNamespace;
 }
 
 // まずはUX優先で軽め推奨（重ければ下げ、軽すぎれば上げる）
-const POW_TTL_SEC = 600; // 10 min
+const POW_TTL_SEC_DEFAULT = 600; // 10 min
 const DIFFICULTY_DEFAULT = 20; // 16-20 range
-const DIFFICULTY_MOBILE = 16;
+const DIFFICULTY_MOBILE_DEFAULT = 16;
 const ROLE_GRANT_MAX_ATTEMPTS = 3;
 const ROLE_GRANT_BASE_DELAY_MS = 200;
+const RATE_LIMIT_WINDOW_SEC = 60;
+const INTERACTIONS_RATE_LIMIT_PER_MIN_DEFAULT = 60;
+const SUBMIT_RATE_LIMIT_PER_MIN_DEFAULT = 20;
 
 // -------------------- util --------------------
 function hexToU8(hex: string): Uint8Array {
@@ -81,12 +91,23 @@ function constantTimeEq(a: string, b: string): boolean {
   return diff === 0;
 }
 
+function securityHeaders(): Record<string, string> {
+  return {
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
+    "cross-origin-opener-policy": "same-origin",
+    "cross-origin-resource-policy": "same-origin",
+  };
+}
+
 function json(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      ...securityHeaders(),
     },
   });
 }
@@ -97,8 +118,7 @@ function html(body: string, status = 200): Response {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
+      ...securityHeaders(),
       // 最低限のCSP（必要なら後で調整）
       "content-security-policy": "default-src 'self'; connect-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     },
@@ -111,8 +131,7 @@ function js(body: string, status = 200): Response {
     headers: {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
+      ...securityHeaders(),
     },
   });
 }
@@ -123,14 +142,23 @@ function css(body: string, status = 200): Response {
     headers: {
       "content-type": "text/css; charset=utf-8",
       "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-      "x-content-type-options": "nosniff",
+      ...securityHeaders(),
     },
   });
 }
 
+function intFromEnv(value: string | undefined, fallback: number, min: number, max: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
 
-function getDifficultyForUserAgent(userAgent: string | null): number {
+function getPowTtlSec(env: Env): number {
+  return intFromEnv(env.POW_TTL_SEC, POW_TTL_SEC_DEFAULT, 60, 3600);
+}
+
+function getDifficultyForUserAgent(env: Env, userAgent: string | null): number {
   const ua = (userAgent ?? "").toLowerCase();
   if (
     ua.includes("mobile") ||
@@ -138,9 +166,9 @@ function getDifficultyForUserAgent(userAgent: string | null): number {
     ua.includes("iphone") ||
     ua.includes("ipad")
   ) {
-    return DIFFICULTY_MOBILE;
+    return intFromEnv(env.POW_DIFFICULTY_MOBILE, DIFFICULTY_MOBILE_DEFAULT, 1, 30);
   }
-  return DIFFICULTY_DEFAULT;
+  return intFromEnv(env.POW_DIFFICULTY_DEFAULT, DIFFICULTY_DEFAULT, 1, 30);
 }
 
 function isEnabled(value: string | undefined): boolean {
@@ -193,6 +221,50 @@ function parseOptions(interaction: any): Record<string, any> {
   return out;
 }
 
+function isGuildAllowed(env: Env, guildId: string): boolean {
+  const raw = env.ALLOWED_GUILD_IDS;
+  if (!raw || raw.trim() === "") return true;
+  const allowed = raw
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  return allowed.includes(guildId);
+}
+
+function getClientKey(req: Request): string {
+  return (
+    req.headers.get("cf-connecting-ip") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown"
+  );
+}
+
+async function checkRateLimit(
+  env: Env,
+  key: string,
+  limit: number,
+  windowSec = RATE_LIMIT_WINDOW_SEC
+): Promise<{ ok: true } | { ok: false; retryAfterSec: number }> {
+  if (limit <= 0) return { ok: true };
+  const keyHash = await sha256Base64Url(key);
+  const id = env.NONCE_STORE.idFromName(`rate:${keyHash}`);
+  const stub = env.NONCE_STORE.get(id);
+  const res = await stub.fetch("https://nonce-store/rate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ limit, windowSec }),
+  });
+  if (res.status !== 429) return { ok: true };
+  const retryAfterSec = Number(res.headers.get("retry-after") ?? windowSec);
+  return { ok: false, retryAfterSec };
+}
+
+function rateLimited(retryAfterSec: number): Response {
+  const res = json({ ok: false, error: "rate limited" }, 429);
+  res.headers.set("retry-after", String(retryAfterSec));
+  return res;
+}
+
 // -------------------- Discord verification --------------------
 async function verifyDiscordSig(req: Request, env: Env, bodyText: string): Promise<boolean> {
   const sigHex = req.headers.get("x-signature-ed25519");
@@ -208,7 +280,7 @@ async function verifyDiscordSig(req: Request, env: Env, bodyText: string): Promi
 // -------------------- token / pow --------------------
 async function makeToken(env: Env, guildId: string, userId: string, difficulty: number): Promise<string> {
   const ts = Math.floor(Date.now() / 1000);
-  const exp = ts + POW_TTL_SEC;
+  const exp = ts + getPowTtlSec(env);
   const tokenNonce = crypto.getRandomValues(new Uint8Array(16));
   const nonceB64u = u8ToBase64Url(tokenNonce);
 
@@ -221,6 +293,7 @@ async function makeToken(env: Env, guildId: string, userId: string, difficulty: 
 function parseToken(token: string) {
   const parts = token.split(".");
   if (parts.length !== 9 || parts[0] !== "pow" || parts[1] !== "v1") return null;
+  if (parts.slice(2).some((part) => !part)) return null;
   const payload = parts.slice(0, 8).join(".");
   return {
     nonce: parts[2],
@@ -234,12 +307,26 @@ function parseToken(token: string) {
   };
 }
 
+type VerifyTokenAndPowResult =
+  | {
+      ok: true;
+      guildId: string;
+      userId: string;
+      tokenNonce: string;
+      expiresAt: number;
+    }
+  | {
+      ok: false;
+      msg: string;
+      debug?: { diff: number; hash_first4: string };
+    };
+
 async function verifyTokenAndPow(
   env: Env,
   tokenRaw: string,
   nonceRaw: string,
   expected?: { userId?: string; guildId?: string }
-) {
+): Promise<VerifyTokenAndPowResult> {
   const token = tokenRaw.trim();
   const nonce = nonceRaw.trim();
 
@@ -330,6 +417,7 @@ function logRoleGrantResult(input: {
   status: number;
   attempts: number;
   retryable: boolean;
+  reason?: string;
 }) {
   console.log(
     JSON.stringify({
@@ -341,8 +429,17 @@ function logRoleGrantResult(input: {
       status: input.status,
       attempts: input.attempts,
       retryable: input.retryable,
+      reason: input.reason,
     })
   );
+}
+
+function describeRoleGrantFailure(status: number): string {
+  if (status === 403) return "missing permission or role hierarchy";
+  if (status === 404) return "guild member or role not found";
+  if (status === 429) return "discord rate limited";
+  if (status >= 500) return "discord server error";
+  return "discord rejected role grant";
 }
 
 async function addRoleDetailed(env: Env, guildId: string, userId: string) {
@@ -402,6 +499,7 @@ async function addRoleWithRetry(
     status: lastStatus,
     attempts,
     retryable: lastRetryable,
+    reason: describeRoleGrantFailure(lastStatus),
   });
   return {
     ok: false,
@@ -625,13 +723,24 @@ export default {
     // ---- Interactions ----
     if (url.pathname === "/interactions") {
       if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+      const rate = await checkRateLimit(
+        env,
+        `interactions:${getClientKey(req)}`,
+        intFromEnv(
+          env.INTERACTIONS_RATE_LIMIT_PER_MIN,
+          INTERACTIONS_RATE_LIMIT_PER_MIN_DEFAULT,
+          0,
+          600
+        )
+      );
+      if (!rate.ok) return rateLimited(rate.retryAfterSec);
 
       const bodyText = await req.text();
       const okSig = await verifyDiscordSig(req, env, bodyText);
       if (!okSig) return new Response("invalid signature", { status: 401 });
 
       const interaction = JSON.parse(bodyText);
-      const difficulty = getDifficultyForUserAgent(req.headers.get("user-agent"));
+      const difficulty = getDifficultyForUserAgent(env, req.headers.get("user-agent"));
 
       // PING
       if (interaction.type === 1) return json({ type: 1 });
@@ -648,6 +757,8 @@ export default {
         const guildId = interaction.guild_id ?? interaction.guild?.id;
         const userId = interaction.member?.user?.id ?? interaction.user?.id;
         if (!guildId || !userId) return json(ephemeral("サーバー内で実行してください。"));
+
+        if (!isGuildAllowed(env, guildId)) return json(ephemeral("このサーバーでは利用できません。"));
 
         const token = await makeToken(env, guildId, userId, difficulty);
         const verifyUrl = `${url.origin}/verify#token=${encodeURIComponent(token)}`;
@@ -666,13 +777,15 @@ export default {
 
         if (!guildId || !userId) return json(ephemeral("このコマンドはサーバー内で実行してください。"));
 
+        if (!isGuildAllowed(env, guildId)) return json(ephemeral("このサーバーでは利用できません。"));
+
         if (name === cmd) {
           const token = await makeToken(env, guildId, userId, difficulty);
           // tokenは#（フラグメント）へ。
           const verifyUrl = `${url.origin}/verify#token=${encodeURIComponent(token)}`;
 
           const content =
-            `PoW認証URLを発行しました（有効 ${POW_TTL_SEC}s / difficulty=${difficulty}）。\n` +
+            `PoW認証URLを発行しました（有効 ${getPowTtlSec(env)}s / difficulty=${difficulty}）。\n` +
             `ボタンから開いて計算すると自動でロールが付与されます。`;
 
           return json(ephemeralWithLink(content, verifyUrl));
@@ -680,6 +793,9 @@ export default {
 
         // 互換: 手動提出用（コマンドが残っていても壊れない）
         if (name === "pow_submit") {
+          if (!isEnabled(env.ENABLE_POW_SUBMIT)) {
+            return json(ephemeral("pow_submit is disabled."));
+          }
           const opts = parseOptions(interaction);
           const token = String((opts.token ?? opts.challenge ?? "")).trim();
           const nonce = String((opts.nonce ?? "")).trim();
@@ -721,6 +837,12 @@ export default {
     // ---- Submit ----
     if (url.pathname === "/api/submit") {
       if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+      const rate = await checkRateLimit(
+        env,
+        `submit:${getClientKey(req)}`,
+        intFromEnv(env.SUBMIT_RATE_LIMIT_PER_MIN, SUBMIT_RATE_LIMIT_PER_MIN_DEFAULT, 0, 600)
+      );
+      if (!rate.ok) return rateLimited(rate.retryAfterSec);
 
       let body: any;
       try {
@@ -742,6 +864,9 @@ export default {
         guildId: submitGuildId,
       });
       if (!v.ok) return json({ ok: false, error: v.msg, debug: (v as any).debug }, 400);
+      if (!isGuildAllowed(env, v.guildId)) {
+        return json({ ok: false, error: "guild not allowed" }, 403);
+      }
 
       const nonceCheck = await checkAndMarkNonce(env, v.tokenNonce, v.expiresAt);
       if (!nonceCheck.ok) return json({ ok: false, error: nonceCheck.msg }, nonceCheck.status);
@@ -767,12 +892,21 @@ export class NonceStore {
 
   async fetch(req: Request): Promise<Response> {
     if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+    const url = new URL(req.url);
 
     let body: any;
     try {
       body = await req.json();
     } catch {
       return new Response("invalid json", { status: 400 });
+    }
+
+    if (url.pathname === "/rate") {
+      return this.handleRateLimit(body);
+    }
+
+    if (url.pathname !== "/check") {
+      return new Response("not found", { status: 404 });
     }
 
     const expiresAt = Number(body?.expiresAt ?? 0);
@@ -783,10 +917,40 @@ export class NonceStore {
     const now = Math.floor(Date.now() / 1000);
     if (now > expiresAt) return new Response("expired", { status: 400 });
 
-    const existing = await this.state.storage.get("used");
-    if (existing) return new Response("used", { status: 409 });
+    const existing = await this.state.storage.get<{ expiresAt?: number }>("used");
+    if (existing && Number(existing.expiresAt ?? 0) > now) {
+      return new Response("used", { status: 409 });
+    }
 
-    await this.state.storage.put("used", { usedAt: now }, { expiration: expiresAt });
+    await this.state.storage.put("used", { usedAt: now, expiresAt });
+    return new Response("ok");
+  }
+
+  private async handleRateLimit(body: any): Promise<Response> {
+    const limit = Number(body?.limit ?? 0);
+    const windowSec = Number(body?.windowSec ?? RATE_LIMIT_WINDOW_SEC);
+    if (!Number.isFinite(limit) || limit <= 0) return new Response("ok");
+    if (!Number.isFinite(windowSec) || windowSec <= 0) {
+      return new Response("invalid windowSec", { status: 400 });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const bucket = await this.state.storage.get<{ count: number; resetAt: number }>("rate");
+    const current =
+      bucket && bucket.resetAt > now
+        ? bucket
+        : { count: 0, resetAt: now + Math.floor(windowSec) };
+
+    if (current.count >= limit) {
+      const retryAfter = Math.max(1, current.resetAt - now);
+      return new Response("rate limited", {
+        status: 429,
+        headers: { "retry-after": String(retryAfter) },
+      });
+    }
+
+    current.count += 1;
+    await this.state.storage.put("rate", current);
     return new Response("ok");
   }
 }
