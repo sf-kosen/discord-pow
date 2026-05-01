@@ -61,6 +61,7 @@ npm run post:verify
 
 補足
 - 必要なら `ENABLE_VERIFY_BUTTON=false` を vars に設定してボタンを無効化できる
+- 互換用の `/pow_submit` を使う場合のみ `ENABLE_POW_SUBMIT=true` を vars に設定する
 
 ## v2 並行稼働
 1) Discord Developer Portal で v2 用の Application / Bot を作成
@@ -109,8 +110,13 @@ npm run deploy:v2
 
 ## 設定
 - `src/index.ts`:
-  - `POW_TTL_SEC` トークンの有効期限（秒）
-  - `DIFFICULTY_DEFAULT` / `DIFFICULTY_MOBILE` PoW 難易度（先頭 0 ビット数、実質のDIFFICULTY）
+  - `POW_TTL_SEC` トークンの有効期限（秒、未指定時 600）
+  - `POW_DIFFICULTY_DEFAULT` / `POW_DIFFICULTY_MOBILE` PoW 難易度（先頭 0 ビット数、未指定時 20 / 16）
+  - `ALLOWED_GUILD_IDS` 許可するGuild IDのカンマ区切り。未指定時は制限なし
+  - `INTERACTIONS_RATE_LIMIT_PER_MIN` `/interactions` のIP単位レート制限。未指定時 60/min、0で無効
+  - `SUBMIT_RATE_LIMIT_PER_MIN` `/api/submit` のIP単位レート制限。未指定時 20/min、0で無効
+  - `ENABLE_VERIFY_BUTTON=false` で常設ボタンを無効化
+  - `ENABLE_POW_SUBMIT=true` で互換用 `/pow_submit` を有効化
 
 ## Secrets
 - `DISCORD_PUBLIC_KEY`
@@ -122,6 +128,12 @@ npm run deploy:v2
 - `POST /interactions`: Discord interaction handler
 - `GET /verify`: PoW ページ
 - `POST /api/submit`: PoW 提出エンドポイント
+
+## 防御実装メモ
+- `/interactions` と `/api/submit` は `NONCE_STORE` Durable Object を使って固定窓のレート制限を行います
+- token nonce は `NONCE_STORE` に保存され、期限内の再利用は `409` で拒否されます
+- `ALLOWED_GUILD_IDS` を設定すると、想定外Guildからの発行・提出を拒否できます
+- レスポンスには `no-store`, `no-referrer`, `nosniff`, `Permissions-Policy`, `COOP`, `CORP` を付与しています
 
 ## 注意
 - Bot ロールが付与対象ロールより上位にあることを確認してください
