@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import worker, { NonceStore } from "../src/index";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
+const ADDITIONAL_VERIFIED_ROLE_ID_2026 = "1455864840630308925";
+const ADDITIONAL_VERIFIED_ROLE_ID_2027 = "1504117815333093426";
 
 class MemoryStorage {
   private values = new Map<string, unknown>();
@@ -173,6 +175,94 @@ describe("nonce replay protection", () => {
       expect(res2.status).toBe(409);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  it("grants the student role and the 2026 additional verified role", async () => {
+    const testEnv = createTestEnv();
+    const grantedRoleIds: string[] = [];
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-13T00:00:00+09:00"));
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("https://discord.com/api/v10/")) {
+        grantedRoleIds.push(url.split("/").pop() ?? "");
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const diff = 1;
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + 600;
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        testEnv.VERIFIED_ROLE_ID,
+        exp,
+        diff
+      );
+      const powNonce = await findPowNonce(token, diff);
+
+      const request = new IncomingRequest("http://example.com/api/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
+      });
+
+      const res = await worker.fetch(request, testEnv);
+      expect(res.status).toBe(200);
+      expect(grantedRoleIds).toEqual([testEnv.VERIFIED_ROLE_ID, ADDITIONAL_VERIFIED_ROLE_ID_2026]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("grants the student role and the 2027 additional verified role after New Year in Japan", async () => {
+    const testEnv = createTestEnv();
+    const grantedRoleIds: string[] = [];
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2027-01-01T00:00:00+09:00"));
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("https://discord.com/api/v10/")) {
+        grantedRoleIds.push(url.split("/").pop() ?? "");
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const diff = 1;
+      const now = Math.floor(Date.now() / 1000);
+      const exp = now + 600;
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        testEnv.VERIFIED_ROLE_ID,
+        exp,
+        diff
+      );
+      const powNonce = await findPowNonce(token, diff);
+
+      const request = new IncomingRequest("http://example.com/api/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" }),
+      });
+
+      const res = await worker.fetch(request, testEnv);
+      expect(res.status).toBe(200);
+      expect(grantedRoleIds).toEqual([testEnv.VERIFIED_ROLE_ID, ADDITIONAL_VERIFIED_ROLE_ID_2027]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
     }
   });
 
