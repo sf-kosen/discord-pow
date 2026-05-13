@@ -26,6 +26,9 @@ const ROLE_GRANT_BASE_DELAY_MS = 200;
 const RATE_LIMIT_WINDOW_SEC = 60;
 const INTERACTIONS_RATE_LIMIT_PER_MIN_DEFAULT = 60;
 const SUBMIT_RATE_LIMIT_PER_MIN_DEFAULT = 20;
+const ADDITIONAL_VERIFIED_ROLE_ID_2026 = "1455864840630308925";
+const ADDITIONAL_VERIFIED_ROLE_ID_2027 = "1504117815333093426";
+const ADDITIONAL_ROLE_2027_START_MS = Date.UTC(2026, 11, 31, 15, 0, 0); // 2027-01-01 00:00 JST
 
 // -------------------- util --------------------
 function hexToU8(hex: string): Uint8Array {
@@ -412,6 +415,7 @@ function sleep(ms: number): Promise<void> {
 function logRoleGrantResult(input: {
   guildId: string;
   userId: string;
+  roleId: string;
   nonceHash: string;
   result: "success" | "failure";
   status: number;
@@ -424,6 +428,7 @@ function logRoleGrantResult(input: {
       event: "role_grant",
       guild_id: input.guildId,
       user_id: input.userId,
+      role_id: input.roleId,
       nonce_hash: input.nonceHash,
       result: input.result,
       status: input.status,
@@ -442,8 +447,17 @@ function describeRoleGrantFailure(status: number): string {
   return "discord rejected role grant";
 }
 
-async function addRoleDetailed(env: Env, guildId: string, userId: string) {
-  const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${env.VERIFIED_ROLE_ID}`;
+function getAdditionalVerifiedRoleId(now = new Date()): string {
+  if (now.getTime() >= ADDITIONAL_ROLE_2027_START_MS) return ADDITIONAL_VERIFIED_ROLE_ID_2027;
+  return ADDITIONAL_VERIFIED_ROLE_ID_2026;
+}
+
+function getRoleIdsToGrant(env: Env): string[] {
+  return Array.from(new Set([env.VERIFIED_ROLE_ID, getAdditionalVerifiedRoleId()]));
+}
+
+async function addRoleDetailed(env: Env, guildId: string, userId: string, roleId: string) {
+  const url = `https://discord.com/api/v10/guilds/${guildId}/members/${userId}/roles/${roleId}`;
   const r = await fetch(url, {
     method: "PUT",
     headers: { Authorization: `Bot ${env.DISCORD_BOT_TOKEN}` },
@@ -460,18 +474,35 @@ async function addRoleWithRetry(
   userId: string,
   nonceHash: string
 ): Promise<{ ok: boolean; status: number; attempts: number; retryable: boolean }> {
+  let lastResult: { ok: boolean; status: number; attempts: number; retryable: boolean } | null = null;
+  for (const roleId of getRoleIdsToGrant(env)) {
+    const result = await addSingleRoleWithRetry(env, guildId, userId, roleId, nonceHash);
+    lastResult = result;
+    if (!result.ok) return result;
+  }
+  return lastResult ?? { ok: true, status: 204, attempts: 0, retryable: false };
+}
+
+async function addSingleRoleWithRetry(
+  env: Env,
+  guildId: string,
+  userId: string,
+  roleId: string,
+  nonceHash: string
+): Promise<{ ok: boolean; status: number; attempts: number; retryable: boolean }> {
   let lastStatus = 500;
   let lastRetryable = false;
   let attempts = 0;
   for (let attempt = 1; attempt <= ROLE_GRANT_MAX_ATTEMPTS; attempt++) {
     attempts = attempt;
-    const res = await addRoleDetailed(env, guildId, userId);
+    const res = await addRoleDetailed(env, guildId, userId, roleId);
     lastStatus = res.status;
     lastRetryable = isRetryableRoleGrantStatus(res.status);
     if (res.ok) {
       logRoleGrantResult({
         guildId,
         userId,
+        roleId,
         nonceHash,
         result: "success",
         status: res.status,
@@ -494,6 +525,7 @@ async function addRoleWithRetry(
   logRoleGrantResult({
     guildId,
     userId,
+    roleId,
     nonceHash,
     result: "failure",
     status: lastStatus,
