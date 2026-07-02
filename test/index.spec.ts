@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import worker, { NonceStore } from "../src/index";
 
 const IncomingRequest = Request<unknown, IncomingRequestCfProperties>;
-const ADDITIONAL_VERIFIED_ROLE_ID_2026 = "1455864840630308925";
+const ADDITIONAL_VERIFIED_ROLE_ID_2026 = "1504117815333093426";
 const ADDITIONAL_VERIFIED_ROLE_ID_2027 = "1504117815333093426";
 
 class MemoryStorage {
