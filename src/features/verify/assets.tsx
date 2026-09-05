@@ -1,29 +1,38 @@
-export function verifyPageHtml(): string {
+export function VerifyPage() {
   // tokenはURLフラグメント(#token=)から読む（サーバーに送られない）
-  return `<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>PoW認証</title>
-  <meta http-equiv="Cache-Control" content="no-store" />
-  <link rel="stylesheet" href="/verify.css" />
-</head>
-<body>
-  <h1>PoW認証</h1>
-  <div class="card">
-    <p class="muted">このページでPoWを計算し、完了すると自動でDiscordのロールが付与されます。</p>
-    <div class="row">
-      <button id="start">計算を開始</button>
-      <span id="status" class="muted">待機中</span>
-    </div>
-    <p class="muted">進捗: <span id="progress">-</span></p>
-    <pre id="detail">-</pre>
-    <p class="small muted">注意: 失敗する場合はBotの権限（Manage Roles）とロール階層（Botロールが対象ロールより上）を確認してください。</p>
-  </div>
-  <script src="/verify.js" defer></script>
-</body>
-</html>`;
+  return (
+    <html lang="ja">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <title>PoW認証</title>
+        <meta http-equiv="Cache-Control" content="no-store" />
+        <link rel="stylesheet" href="/verify.css" />
+      </head>
+      <body>
+        <h1>PoW認証</h1>
+        <div class="card">
+          <p class="muted">このページでPoWを計算し、完了すると自動でDiscordのロールが付与されます。</p>
+          <div class="row">
+            <button id="start">計算を開始</button>
+            <span id="status" class="muted">待機中</span>
+          </div>
+          <p class="muted">
+            進捗: <span id="progress">-</span>
+          </p>
+          <pre id="detail">-</pre>
+          <p class="small muted">
+            注意: 失敗する場合はBotの権限（Manage Roles）とロール階層（Botロールが対象ロールより上）を確認してください。
+          </p>
+        </div>
+        <script src="/verify.js" defer></script>
+      </body>
+    </html>
+  );
+}
+
+export function verifyPageHtml(): string {
+  return `<!doctype html>\n${String(<VerifyPage />)}`;
 }
 
 export function verifyPageCss(): string {
