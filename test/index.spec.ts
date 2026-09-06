@@ -263,6 +263,81 @@ describe("nonce replay protection", () => {
     }
   });
 
+  it("finalizes the nonce when a successful role grant crosses the claim lease", async () => {
+    const testEnv = createTestEnv({ VERIFIED_ROLE_ID: ADDITIONAL_VERIFIED_ROLE_ID_2026 });
+    let discordCalls = 0;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-13T00:00:00Z"));
+
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("https://discord.com/api/v10/")) {
+        discordCalls += 1;
+        vi.setSystemTime(new Date(Date.now() + 31_000));
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    try {
+      const diff = 1;
+      const now = Math.floor(Date.now() / 1000);
+      const token = await makeToken(
+        testEnv.POW_SECRET,
+        "guild",
+        "user",
+        testEnv.VERIFIED_ROLE_ID,
+        now + 600,
+        diff
+      );
+      const powNonce = await findPowNonce(token, diff);
+      const body = JSON.stringify({ token, nonce: powNonce, user_id: "user", guild_id: "guild" });
+      const makeRequest = () =>
+        new IncomingRequest("http://example.com/api/submit", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+
+      const firstResponse = await fetchApp(makeRequest(), testEnv);
+      expect(firstResponse.status).toBe(200);
+
+      const secondResponse = await fetchApp(makeRequest(), testEnv);
+      expect(secondResponse.status).toBe(409);
+      expect(discordCalls).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects completion from a claim replaced after its lease expires", async () => {
+    const store = new NonceStore({ storage: new MemoryStorage() } as any);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-13T00:00:00Z"));
+
+    const post = (path: string, body: Record<string, unknown>) =>
+      store.fetch(
+        new Request(`https://nonce-store${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      );
+
+    try {
+      const expiresAt = Math.floor(Date.now() / 1000) + 600;
+      expect((await post("/claim", { expiresAt, claimId: "claim-a" })).status).toBe(200);
+
+      vi.setSystemTime(new Date(Date.now() + 31_000));
+      expect((await post("/claim", { expiresAt, claimId: "claim-b" })).status).toBe(200);
+      expect((await post("/complete", { claimId: "claim-a" })).status).toBe(409);
+      expect((await post("/complete", { claimId: "claim-b" })).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects a token and nonce at their exact expiry second", async () => {
     const testEnv = createTestEnv();
     vi.useFakeTimers();

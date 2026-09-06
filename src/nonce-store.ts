@@ -190,7 +190,9 @@ export class NonceStore {
       const now = Math.floor(Date.now() / 1000);
       const existing = await this.state.storage.get<any>("used");
       if (existing?.status === "used" && Number(existing.expiresAt ?? 0) > now) {
-        return new Response("ok");
+        return existing.claimId === claimId
+          ? new Response("ok")
+          : new Response("claim mismatch", { status: 409 });
       }
       if (!existing || existing.status !== "processing" || existing.claimId !== claimId) {
         return new Response("claim mismatch", { status: 409 });
@@ -198,12 +200,10 @@ export class NonceStore {
       if (now >= Number(existing.expiresAt ?? 0)) {
         return new Response("expired", { status: 400 });
       }
-      if (Number(existing.leaseUntil ?? 0) <= now) {
-        return new Response("claim expired", { status: 409 });
-      }
-
+      // A late completion is safe while no newer claim has replaced this owner.
       await this.state.storage.put("used", {
         status: "used",
+        claimId,
         usedAt: now,
         expiresAt: existing.expiresAt,
       });
